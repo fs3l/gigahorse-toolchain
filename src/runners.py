@@ -60,7 +60,7 @@ class DecompilationException(Exception):
 
 
 def set_memory_limit(memory_limit: int):
-    resource.setrlimit(resource.RLIMIT_AS, (memory_limit, memory_limit))
+    return
 
 
 def get_souffle_executable_path(cache_dir: str, dl_filename: str) -> str:
@@ -249,8 +249,7 @@ def compile_datalog(
 
     cpp_macros = []
     for macro_def in souffle_macros.split(" "):
-        cpp_macros.append("-D")
-        cpp_macros.append(macro_def)
+        cpp_macros.append(f"-D{macro_def}")
 
     preproc_command = ["cpp", "-P", spec, *cpp_macros]
     preproc_process = subprocess.run(preproc_command, text=True, capture_output=True)
