@@ -1,3 +1,11 @@
+g:
+	git add -A 
+	git commit -am "comments"
+	git push
+
+
+
+
 # Python tooling for gigahorse-toolchain.
 #
 # ruff and mypy are uv-managed dev dependencies (see [dependency-groups] in
