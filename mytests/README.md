@@ -6,7 +6,7 @@ Every command needed, from a fresh machine to the decompiled output of
 ## 1. Install dependencies
 
 ```
-brew install boost z3
+brew install boost z3 solidity
 brew install souffle-lang/souffle/souffle
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
@@ -17,14 +17,15 @@ Do **not** add `--HEAD` to the Souffle install. The development branch fails wit
 Add `uv` to your PATH:
 
 ```
-fish_add_path ~/.local/bin          # fish
-export PATH="$HOME/.local/bin:$PATH" # bash / zsh
+fish_add_path ~/.local/bin            # fish
+export PATH="$HOME/.local/bin:$PATH"  # bash / zsh
 ```
 
-Check:
+Check all four:
 
 ```
 souffle --version
+solc --version
 uv --version
 ```
 
@@ -32,12 +33,16 @@ uv --version
 
 ```
 cd ~
-git clone --recursive https://github.com/fs3l/gigahorse-toolchain.git
+git clone --recursive git@github.com:fs3l/gigahorse-toolchain.git
 cd gigahorse-toolchain
 ```
 
 The `--recursive` flag is required — it fetches the `souffle-addon` submodule.
 If you forgot it: `git submodule update --init --recursive`.
+
+This uses SSH, which needs a key registered with GitHub. Create one with
+`ssh-keygen -t ed25519`, add `~/.ssh/id_ed25519.pub` under GitHub → Settings →
+SSH and GPG keys, and verify with `ssh -T git@github.com`.
 
 ## 3. Build the Souffle functor library
 
@@ -92,11 +97,8 @@ cd mytests
 make
 ```
 
-The first run compiles four Datalog programs to native binaries and takes about
-two minutes. They are cached in `../cache/`, so later runs take a few seconds.
-
-Output ends with the lifted three-address IR of `Max.sol`, also saved to
-`../.temp/Max/out/contract.tac`:
+`make` compiles `Max.sol` to runtime bytecode, decompiles it, and prints the
+lifted three-address IR:
 
 ```
 function max(uint256)() public {
@@ -107,32 +109,52 @@ function max(uint256)() public {
     ...
 ```
 
-`make` uses the committed `Max.hex`, so no Solidity compiler is needed.
+The listing is also saved to `../.temp/Max/out/contract.tac`.
 
-## Other make targets
+The first run compiles four Datalog programs to native binaries and takes about
+two minutes. They are cached in `../cache/`, so later runs take a few seconds.
+
+To start over:
 
 ```
-make clean    delete .temp and build intermediates
-make hex      recompile Max.hex from Max.sol (requires solc)
+make clean
+make
 ```
 
-`make hex` is only for changing the contract. Install the compiler with
-`brew install solidity`, and commit the regenerated `Max.hex` so that other
-people still do not need solc.
+## Analysing your own contract
+
+Replace `Max.sol` with your own contract, keeping the file name and the contract
+name aligned — `solc` writes its artifact using the **contract** name, not the
+file name. Then:
+
+```
+make clean
+make
+```
 
 ## Troubleshooting
+
+`solc: No such file or directory` — solc is missing; see step 1.
 
 `Cannot find libfunctors.so` — step 3 did not complete. Re-run it.
 
 `Library not loaded: libsoufflenum.so` — the `install_name_tool` line in step 3
-was skipped. Run it, then `rm -rf cache` and run `make` again.
+was skipped. Run it, then `rm -rf ../cache` and run `make` again.
 
 `<cstddef> tried including <stddef.h>` or `The build tool has reset ENV` — step 4
-was skipped or was undone by a `brew upgrade`. Re-run step 4, then `rm -rf cache`.
+was skipped, or was undone by a `brew upgrade`. Re-run step 4, then `rm -rf ../cache`.
 
 `Killed signal terminated program cc1plus` — out of memory. The four Datalog
 programs compile in parallel and need roughly 2-3 GB each.
 
-After changing Souffle or rebuilding `souffle-addon`, always `rm -rf cache` first.
-The cache key is an MD5 of the Datalog source only, so it does not notice that the
-toolchain underneath it changed.
+After changing Souffle or rebuilding `souffle-addon`, always `rm -rf ../cache`
+first. The cache key is an MD5 of the Datalog source only, so it does not notice
+that the toolchain underneath it changed.
+
+## Files
+
+| file | purpose |
+|---|---|
+| `Max.sol` | Solidity source — the only input |
+| `Makefile` | `make`, `make clean` |
+| `SETUP-macos.txt` | macOS setup notes |
