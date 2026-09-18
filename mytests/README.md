@@ -150,11 +150,3 @@ programs compile in parallel and need roughly 2-3 GB each.
 After changing Souffle or rebuilding `souffle-addon`, always `rm -rf ../cache`
 first. The cache key is an MD5 of the Datalog source only, so it does not notice
 that the toolchain underneath it changed.
-
-## Files
-
-| file | purpose |
-|---|---|
-| `Max.sol` | Solidity source — the only input |
-| `Makefile` | `make`, `make clean` |
-| `SETUP-macos.txt` | macOS setup notes |
