@@ -1,12 +1,13 @@
 # Running Gigahorse on macOS
 
 Every command needed, from a fresh machine to the decompiled output of
-`mytests/Max.sol`. Tested on macOS (Apple Silicon).
+`mytests/Max.sol`, its control-flow graph and its data-flow graph.
+Tested on macOS (Apple Silicon).
 
 ## 1. Install dependencies
 
 ```
-brew install boost z3 solidity
+brew install boost z3 solidity graphviz
 brew install souffle-lang/souffle/souffle
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
@@ -21,12 +22,19 @@ fish_add_path ~/.local/bin            # fish
 export PATH="$HOME/.local/bin:$PATH"  # bash / zsh
 ```
 
-Check all four:
+`graphviz` provides `dot`, used by the graph scripts in steps 7 and 8. `python3`
+comes with the macOS Command Line Tools; if it is missing, install them with
+`xcode-select --install`. The graph scripts use only the standard library, so
+they need no Python packages of their own.
+
+Check everything:
 
 ```
 souffle --version
 solc --version
 uv --version
+dot -V
+python3 --version
 ```
 
 ## 2. Clone the repository
@@ -97,8 +105,9 @@ cd mytests
 make
 ```
 
-`make` compiles `Max.sol` to runtime bytecode, decompiles it, and prints the
-lifted three-address IR:
+`make` compiles `Max.sol` to runtime bytecode, decompiles it, draws the two
+graphs described in steps 7 and 8, opens them, and prints the lifted
+three-address IR:
 
 ```
 function max(uint256)() public {
@@ -121,6 +130,84 @@ make clean
 make
 ```
 
+## 7. Control-flow graph (CFG)
+
+Which code can run after which. Nodes are basic blocks, edges are possible
+transfers of control. `make` builds this, or run it directly:
+
+```
+python3 cfg.py > cfg.dot
+dot -Tpng cfg.dot -o cfg.png
+open cfg.png
+```
+
+Each node shows a block's full statement list in the same notation as
+`contract.tac`, so a node here is exactly one `Begin block` section there, and
+its arrows are that section's `prev=` and `succ=` lists.
+
+```
+solid black    jump
+dashed black   fallthrough
+bold blue      call into a private function
+dotted blue    return from a private function
+```
+
+Functions are drawn as labelled boxes. Alongside the contract's own functions
+you will see `__function_selector__` (the dispatcher solc generates to route
+calls by their 4-byte selector), `fallback()`, and any private helpers the
+compiler emitted — for example its overflow-checked `+` and `-`, each ending in
+a `Panic(0x11)` revert.
+
+`cfg.py` takes the output directory as an optional argument, for a contract
+other than `Max`:
+
+```
+python3 cfg.py ../.temp/Foo/out > cfg.dot
+```
+
+## 8. Data-flow graph (DFG)
+
+How values move. Nodes are individual statements, edges run from the single
+statement that defines a variable to each statement that uses it. The IR is in
+SSA form — every variable has exactly one definition — so these edges are exact
+rather than approximate.
+
+```
+python3 dfg.py ../.temp/Max/out max > dfg.dot
+dot -Tpng dfg.dot -o dfg.png
+open dfg.png
+```
+
+The second argument filters to functions whose name contains that text. Drop it
+to draw every function, which is considerably larger.
+
+Storage and memory operations are colour-filled, since they are what a
+read/write set is built from:
+
+```
+blue      SLOAD    storage read
+red       SSTORE   storage write
+green     MLOAD    memory read
+yellow    MSTORE   memory write
+```
+
+Node labels match `cfg.py` and `contract.tac` line for line, so the three views
+can be read against each other: a CFG node is one block, and each line inside it
+is one DFG node.
+
+```
+contract.tac                    cfg.py node 0x4b         dfg.py nodes
+0x51: v51 = SLOAD v4f(0x2)  ->  same line in the box  ->  node "0x51"
+0x52: v52 = GT v51, v4d(0x1)    same line in the box      node "0x52"
+```
+
+Expect the DFG to fall into several disconnected islands. That is correct, not a
+defect: def-use edges follow *variables*, and three things move values by other
+means — storage (`SSTORE` to a slot, then `SLOAD` of the same slot), calls
+(an argument becomes a different variable inside the callee), and control flow
+(a `JUMPI` decides which island executes). The first of those is what a
+read/write set captures.
+
 ## Analysing your own contract
 
 Replace `Max.sol` with your own contract, keeping the file name and the contract
@@ -132,9 +219,14 @@ make clean
 make
 ```
 
+The `make` rule passes `max` as the DFG's function filter. If your function has
+a different name, update that line or the data-flow graph will come out empty.
+
 ## Troubleshooting
 
 `solc: No such file or directory` — solc is missing; see step 1.
+
+`dot: command not found` — graphviz is missing; see step 1.
 
 `Cannot find libfunctors.so` — step 3 did not complete. Re-run it.
 
@@ -146,6 +238,10 @@ was skipped, or was undone by a `brew upgrade`. Re-run step 4, then `rm -rf ../c
 
 `Killed signal terminated program cc1plus` — out of memory. The four Datalog
 programs compile in parallel and need roughly 2-3 GB each.
+
+An empty graph, or one missing most nodes — the output directory is wrong or
+stale. The scripts read `../.temp/<contract>/out`, which exists only after a
+successful `make`.
 
 After changing Souffle or rebuilding `souffle-addon`, always `rm -rf ../cache`
 first. The cache key is an MD5 of the Datalog source only, so it does not notice
