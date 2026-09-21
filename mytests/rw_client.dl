@@ -1,0 +1,39 @@
+// Storage read/write set for a decompiled contract.
+//
+//   souffle -F ../.temp/Max/out -D . rw_client.dl \
+//           -M "GIGAHORSE_DIR=$(cd .. && pwd)/ BULK_ANALYSIS="
+//
+// Storage is persistent state: SLOAD / SSTORE. Its slots are usually
+// compile-time constants, so they are reported as slot numbers.
+
+#include "../clientlib/decompiler_imports.dl"
+
+.decl StorageRead(func: Function, slot: Value)
+.output StorageRead
+
+StorageRead(func, slot) :-
+  SLOAD(stmt, index, _),
+  Variable_Value(index, slot),
+  Statement_Block(stmt, block),
+  InFunction(block, func).
+
+.decl StorageWrite(func: Function, slot: Value)
+.output StorageWrite
+
+StorageWrite(func, slot) :-
+  SSTORE(stmt, index, _),
+  Variable_Value(index, slot),
+  Statement_Block(stmt, block),
+  InFunction(block, func).
+
+// A slot the analysis could not resolve to a constant, which happens for
+// mappings and dynamic arrays, where the slot is a runtime keccak256. Any row
+// here means the two sets above are incomplete.
+.decl UnresolvedStorageSlot(func: Function, stmt: Statement)
+.output UnresolvedStorageSlot
+
+UnresolvedStorageSlot(func, stmt) :-
+  (SLOAD(stmt, index, _) ; SSTORE(stmt, index, _)),
+  !Variable_Value(index, _),
+  Statement_Block(stmt, block),
+  InFunction(block, func).
