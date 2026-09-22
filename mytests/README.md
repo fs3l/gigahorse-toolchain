@@ -4,6 +4,27 @@ Every command needed, from a fresh machine to the decompiled output of
 `mytests/Max.sol`, its control-flow graph and its data-flow graph.
 Tested on macOS (Apple Silicon).
 
+## Pipeline
+
+Five stages sit between the source and the result. The last three are
+independent consumers of the same intermediate data, and `make` runs all of
+them in order.
+
+| # | stage | tool | input | output |
+|---|---|---|---|---|
+| 1 | compile | `solc` | `Max.sol` | `Max.hex` — runtime bytecode |
+| 2 | fact generation | `gigahorse.py` (Python) | `Max.hex` | `.temp/Max/*.facts` |
+| 3 | decompile | `logic/main.dl` via Souffle | `.temp/Max/*.facts` | `.temp/Max/out/*.csv` (~95 files) |
+| 4 | inline | `clientlib/function_inliner.dl` via Souffle | `.temp/Max/out/*.csv` | overwrites 26 of them |
+| 5a | pretty-print | `clients/visualizeout.py` | `out/*.csv` | `contract.tac` |
+| 5b | draw graphs | `cfg.py`, `dfg.py` | `out/*.csv` | `cfg.png`, `dfg.png` |
+| 5c | analyse | `rw_client.dl` via Souffle | `out/*.csv` | `StorageRead.csv`, `StorageWrite.csv` |
+
+The whole input to the analysis is stage 2's output: a disassembly expressed as
+three tables — offset to opcode, offset to next offset, offset to pushed
+constant. No control-flow graph, no functions and no variables are supplied;
+all three are derived in stage 3.
+
 ## 1. Install dependencies
 
 ```
@@ -207,6 +228,76 @@ means — storage (`SSTORE` to a slot, then `SLOAD` of the same slot), calls
 (an argument becomes a different variable inside the callee), and control flow
 (a `JUMPI` decides which island executes). The first of those is what a
 read/write set captures.
+
+## 9. Storage read/write set
+
+Which storage slots the contract reads and writes. This is the only piece that
+is an *analysis* rather than a rendering: `rw_client.dl` is a Souffle Datalog
+program, run over the same relations the graphs are drawn from.
+
+`make` runs it, or run it directly — it takes about two seconds, since the
+facts already exist:
+
+```
+souffle -F ../.temp/Max/out -D . rw_client.dl \
+        -M "GIGAHORSE_DIR=$(cd .. && pwd)/ BULK_ANALYSIS="
+cat StorageRead.csv StorageWrite.csv
+```
+
+`-F` is the fact directory that every `.input` reads from, `-D` is where
+`.output` writes, and `-M` passes macros to the C preprocessor:
+`GIGAHORSE_DIR` so the include can locate the functor declarations, and
+`BULK_ANALYSIS=` to suppress the library's debug outputs. Omitting the latter
+produces stray `Fail.csv` and `PublicFunctionId.csv` files.
+
+The whole analysis is two rules:
+
+```prolog
+#include "../clientlib/decompiler_imports.dl"
+
+.decl StorageRead(func: Function, slot: Value)
+.output StorageRead
+
+StorageRead(func, slot) :-
+  SLOAD(stmt, index, _),
+  Variable_Value(index, slot),
+  Statement_Block(stmt, block),
+  InFunction(block, func).
+```
+
+Read it as: *a function reads a slot if there is an `SLOAD` inside it whose
+slot operand is a variable with that constant value.* `:-` means "if", commas
+mean "and", and a variable repeated across clauses forces a join — `index`
+links the `SLOAD` to its constant, `stmt` links it to its block, `block` links
+that to its function. `_` is a wildcard for a column that does not matter, here
+the value loaded. `StorageWrite` is the same with `SSTORE`.
+
+The client never names a file. `decompiler_imports.dl` declares each relation
+and binds it to a filename with `.input`; the `-F` flag supplies the directory.
+`SLOAD` is not read from anywhere — it is derived in `tac_instructions.dl` from
+`TAC_Op.csv`, `TAC_Def.csv` and `TAC_Use.csv`.
+
+Output for `Max.sol`:
+
+```
+=== storage reads (function, slot) ===
+0x2d	0x0
+0x2d	0x2
+0x2d	0x1
+=== storage writes (function, slot) ===
+0x2d	0x0
+```
+
+`0x2d` is the entry-block address of `max()`; the second column is a storage
+slot. Slots are assigned in declaration order, so this reads `b`, `a` and `c`
+and writes `b`. Four `SLOAD` instructions produce three rows because a Datalog
+relation is a set and slot 0 is read twice.
+
+Two limitations worth knowing. The rule matches only slots that are
+compile-time constants, so a `mapping` or dynamic array — whose slot is a
+runtime `keccak256` — is skipped silently; handling those needs
+`clientlib/storage_modeling/`. And an access inside a private helper is
+attributed to the helper, not to its caller.
 
 ## Analysing your own contract
 

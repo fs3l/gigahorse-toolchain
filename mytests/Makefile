@@ -1,7 +1,3 @@
-# Compile Max.sol, decompile it, draw the CFG and DFG,
-# and print the storage read/write set:                 make
-# Delete everything generated:                          make clean
-
 .PHONY: all clean
 
 all:
@@ -19,9 +15,7 @@ all:
 	@cat StorageRead.csv
 	@echo "=== storage writes (function, slot) ==="
 	@cat StorageWrite.csv
-	@echo "=== unresolved storage slots (empty means the sets above are complete) ==="
-	@cat UnresolvedStorageSlot.csv
 
 clean:
 	rm -rf ../.temp Max.hex Max.bin-runtime cfg.dot cfg.png dfg.dot dfg.png \
-		StorageRead.csv StorageWrite.csv UnresolvedStorageSlot.csv
+		StorageRead.csv StorageWrite.csv

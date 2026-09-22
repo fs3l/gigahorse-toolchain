@@ -19,14 +19,21 @@ SSA form, so these edges are exact.
     red     SSTORE     storage write
     green   MLOAD      memory read
     yellow  MSTORE     memory write
+
+There is no edge file to read: the edges are computed by joining TAC_Def and
+TAC_Use on the variable.
 """
 import csv
 import os
 import sys
 
+# Directory holding Gigahorse's output relations, i.e. this script's input.
 OUT = sys.argv[1] if len(sys.argv) > 1 else "../.temp/Max/out"
+# Optional substring; only functions whose id or name contains it are drawn.
 FILTER = sys.argv[2] if len(sys.argv) > 2 else None
 
+# Storage and memory operations are highlighted, since they are what a
+# read/write set is built from.
 FILL = {
     "SLOAD": "#cfe8ff",
     "SSTORE": "#ffd0d0",
@@ -36,6 +43,11 @@ FILL = {
 
 
 def load(name):
+    """Read one tab-separated relation into a list of rows.
+
+    Returns an empty list if the file is absent, so a missing relation
+    degrades the picture instead of crashing the script.
+    """
     path = os.path.join(OUT, name)
     if not os.path.exists(path):
         return []
@@ -43,16 +55,21 @@ def load(name):
         return [r for r in csv.reader(f, delimiter="\t") if r]
 
 
-op_of = {s: o for s, o in load("TAC_Op.csv")}
-block_of = {s: b for s, b in load("TAC_Block.csv")}
-func_of = {b: f for b, f in load("InFunction.csv")}
-names = {f: n for f, n in load("HighLevelFunctionName.csv")}
-value_of = {v: val for v, val in load("TAC_Variable_Value.csv")}
+# --- load the relations -----------------------------------------------------
+
+op_of = {s: o for s, o in load("TAC_Op.csv")}                    # statement -> opcode
+block_of = {s: b for s, b in load("TAC_Block.csv")}              # statement -> block
+func_of = {b: f for b, f in load("InFunction.csv")}              # block -> function
+names = {f: n for f, n in load("HighLevelFunctionName.csv")}     # function -> "max()"
+value_of = {v: val for v, val in load("TAC_Variable_Value.csv")}  # variable -> constant
 
 defines = [(s, v) for s, v, _ in load("TAC_Def.csv")]
 uses = [(s, v, int(n)) for s, v, n in load("TAC_Use.csv")]
 
+# The IR is SSA, so each variable has exactly one defining statement. That is
+# what makes the def-use edges below exact rather than approximate.
 def_of_var = {v: s for s, v in defines}
+
 defs_by_stmt = {}
 for s, v in defines:
     defs_by_stmt.setdefault(s, []).append(v)
@@ -62,17 +79,22 @@ for s, v, n in uses:
 
 
 def vname(var):
-    """Render a variable the way contract.tac does: 0x51 -> v51."""
+    """Render a variable the way contract.tac does: "0x51" -> "v51"."""
     return "v" + var.replace("0x", "")
 
 
 def operand(var):
-    """v4f(0x2) for a constant, v51 for anything else."""
+    """Render an operand: "v4f(0x2)" for a constant, "v51" otherwise.
+
+    Only constants appear in TAC_Variable_Value.csv, so a failed lookup is
+    what marks a value computed at runtime.
+    """
     val = value_of.get(var)
     return f"{vname(var)}({val})" if val else vname(var)
 
 
 def keep(stmt):
+    """Whether this statement is inside the function the user asked for."""
     if FILTER is None:
         return True
     f = func_of.get(block_of.get(stmt))
@@ -80,6 +102,12 @@ def keep(stmt):
 
 
 def label(stmt):
+    """Reassemble one IR line, e.g. "0x51: v51 = SLOAD v4f(0x2)".
+
+    Operands are sorted by position, which matters because SUB a, b is not
+    SUB b, a. Statements that define nothing, such as SSTORE, print without
+    the "=" part.
+    """
     op = op_of.get(stmt, "?")
     args = " ".join(operand(v) for _, v in sorted(uses_by_stmt.get(stmt, [])))
     out = ", ".join(operand(v) for v in defs_by_stmt.get(stmt, []))
@@ -87,23 +115,33 @@ def label(stmt):
     return f"{stmt}: {out} = {body}" if out else f"{stmt}: {body}"
 
 
-# Every statement in scope becomes a node, connected or not.
+# --- build the graph --------------------------------------------------------
+
+# Every statement in scope becomes a node, whether or not anything connects
+# to it, so the picture matches cfg.py block for block.
 all_stmts = [s for s in op_of if keep(s)]
 
+# One edge per use: from the statement that defined the variable to the
+# statement that uses it. This join is the whole data-flow graph.
 edges = []
 for use_stmt, var, _ in uses:
     def_stmt = def_of_var.get(var)
     if def_stmt is not None and keep(def_stmt) and keep(use_stmt):
         edges.append((def_stmt, use_stmt, var))
 
+# function -> its statements, for clustering
 by_func = {}
 for stmt in all_stmts:
     by_func.setdefault(func_of.get(block_of.get(stmt)), []).append(stmt)
+
+# --- emit the DOT file ------------------------------------------------------
 
 print("digraph DFG {")
 print("  rankdir=TB; ranksep=0.4; nodesep=0.3;")
 print('  node [shape=box fontname="Courier" fontsize=10];')
 
+# One cluster per function. A subgraph only draws a visible box if its name
+# begins with "cluster" -- a Graphviz convention, not a naming choice.
 for i, (func, stmts) in enumerate(sorted(by_func.items(), key=lambda kv: str(kv[0]))):
     print(f"  subgraph cluster_{i} {{")
     print(f'    label="{names.get(func, func)}"; color=gray; style=rounded;')
@@ -113,6 +151,7 @@ for i, (func, stmts) in enumerate(sorted(by_func.items(), key=lambda kv: str(kv[
         print(f'    "{stmt}" [label="{label(stmt)}"{extra}];')
     print("  }")
 
+# Each edge is labelled with the variable flowing along it.
 for def_stmt, use_stmt, var in edges:
     print(f'  "{def_stmt}" -> "{use_stmt}" [label="{vname(var)}" fontsize=8];')
 
