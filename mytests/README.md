@@ -293,12 +293,6 @@ slot. Slots are assigned in declaration order, so this reads `b`, `a` and `c`
 and writes `b`. Four `SLOAD` instructions produce three rows because a Datalog
 relation is a set and slot 0 is read twice.
 
-Two limitations worth knowing. The rule matches only slots that are
-compile-time constants, so a `mapping` or dynamic array — whose slot is a
-runtime `keccak256` — is skipped silently; handling those needs
-`clientlib/storage_modeling/`. And an access inside a private helper is
-attributed to the helper, not to its caller.
-
 ## Analysing your own contract
 
 Replace `Max.sol` with your own contract, keeping the file name and the contract
