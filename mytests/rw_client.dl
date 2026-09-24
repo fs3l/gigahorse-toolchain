@@ -1,19 +1,31 @@
 #include "../clientlib/decompiler_imports.dl"
+  #include "../clientlib/memory_modeling/memory_modeling.dl"
+  #include "../clientlib/storage_modeling/storage_modeling.dl"
 
-.decl StorageRead(func: Function, slot: Value)
-.output StorageRead
+  .decl StorageRead(func: Function, cons: StorageConstruct)
+  .output StorageRead
 
-StorageRead(func, slot) :-
-  SLOAD(stmt, index, _),
-  Variable_Value(index, slot),
-  Statement_Block(stmt, block),
-  InFunction(block, func).
+  StorageRead(func, cons) :-
+    StorageLoad(stmt, cons, _),
+    Statement_Block(stmt, block),
+    InFunction(block, func).
 
-.decl StorageWrite(func: Function, slot: Value)
-.output StorageWrite
+  StorageRead(func, cons) :-
+    StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
+    SLOAD(stmt, _, _),
+    Statement_Block(stmt, block),
+    InFunction(block, func).
 
-StorageWrite(func, slot) :-
-  SSTORE(stmt, index, _),
-  Variable_Value(index, slot),
-  Statement_Block(stmt, block),
-  InFunction(block, func).
+  .decl StorageWrite(func: Function, cons: StorageConstruct)
+  .output StorageWrite
+
+  StorageWrite(func, cons) :-
+    StorageStore(stmt, cons, _),
+    Statement_Block(stmt, block),
+    InFunction(block, func).
+
+  StorageWrite(func, cons) :-
+    StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
+    SSTORE(stmt, _, _),
+    Statement_Block(stmt, block),
+    InFunction(block, func).

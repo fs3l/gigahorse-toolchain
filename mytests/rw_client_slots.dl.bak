@@ -1,0 +1,19 @@
+#include "../clientlib/decompiler_imports.dl"
+
+.decl StorageRead(func: Function, slot: Value)
+.output StorageRead
+
+StorageRead(func, slot) :-
+  SLOAD(stmt, index, _),
+  Variable_Value(index, slot),
+  Statement_Block(stmt, block),
+  InFunction(block, func).
+
+.decl StorageWrite(func: Function, slot: Value)
+.output StorageWrite
+
+StorageWrite(func, slot) :-
+  SSTORE(stmt, index, _),
+  Variable_Value(index, slot),
+  Statement_Block(stmt, block),
+  InFunction(block, func).

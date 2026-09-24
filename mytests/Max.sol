@@ -2,11 +2,9 @@
 pragma solidity ^0.8.0;
 
 contract Max {
-    function max(uint256 a, uint256 b) public pure returns (uint256) {
-        if (a > b) {
-            return a;
-        } else {
-            return b;
-        }}}
+    uint256[] array;
 
-
+    function max(uint256 idx) public returns (uint256) {
+        array[idx] = 9;
+    }
+}
