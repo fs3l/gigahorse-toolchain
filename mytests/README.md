@@ -133,9 +133,11 @@ three-address IR:
 ```
 function max(uint256)() public {
     Begin block 0x2d
-    prev=[], succ=[0xcaB0x2d]
+    prev=[], succ=[0xbbB0x2d]
     =================================
     0x2e: v2e(0x47) = CONST
+    0x31: v31(0x4) = CONST
+    0x34: v34 = CALLDATASIZE
     ...
 ```
 
@@ -231,67 +233,122 @@ read/write set captures.
 
 ## 9. Storage read/write set
 
-Which storage slots the contract reads and writes. This is the only piece that
+Which storage locations the contract reads and writes. This is the only piece that
 is an *analysis* rather than a rendering: `rw_client.dl` is a Souffle Datalog
 program, run over the same relations the graphs are drawn from.
 
-`make` runs it, or run it directly — it takes about two seconds, since the
-facts already exist:
+`make` runs it. To run it on its own, `.temp` must already exist, so run `make` at
+least once first:
 
 ```
-souffle -F ../.temp/Max/out -D . rw_client.dl \
+souffle -F ../.temp/Max/out -D . -L ../souffle-addon rw_client.dl \
         -M "GIGAHORSE_DIR=$(cd .. && pwd)/ BULK_ANALYSIS="
 cat StorageRead.csv StorageWrite.csv
 ```
 
-`-F` is the fact directory that every `.input` reads from, `-D` is where
-`.output` writes, and `-M` passes macros to the C preprocessor:
-`GIGAHORSE_DIR` so the include can locate the functor declarations, and
-`BULK_ANALYSIS=` to suppress the library's debug outputs. Omitting the latter
-produces stray `Fail.csv` and `PublicFunctionId.csv` files.
+`-F` is the fact directory that every `.input` reads from, `-D` is where `.output`
+writes, and `-L` points at the `souffle-addon` functor library, which the storage
+model needs for its 256-bit arithmetic (`add_256` and friends). `-M` passes macros
+to the C preprocessor: `GIGAHORSE_DIR` so the includes can locate the functor
+declarations, and `BULK_ANALYSIS=` to suppress the library's debug outputs.
+Omitting the latter produces stray `Fail.csv` and `PublicFunctionId.csv` files.
 
-The whole analysis is two rules:
+### The three includes
+
+| include | why it is there |
+|---|---|
+| `decompiler_imports.dl` | binds each `.csv` to a relation, and derives the per-opcode relations (`SLOAD`, `SSTORE`) along with `Statement_Block` and `InFunction` |
+| `memory_modeling` | never referenced directly, but `storage_modeling` depends on it. It must come **first**, or the build fails with 58 `Undefined relation PHITrans` errors |
+| `storage_modeling` | the storage analysis proper: `StorageConstruct`, `StorageLoad`, `StorageStore`, `StorageStmtKindAndConstruct` |
+
+`memory_modeling` is load-bearing rather than incidental. A dynamic array element
+lives at `keccak256(slot) + idx`, and solc writes the slot into *memory* before
+hashing it — `MSTORE 0x0, 0x0` then `SHA3 0x0, 0x20`. Connecting those two
+statements is memory modeling. Without it the `SHA3` cannot be tied to the value
+being hashed, and the array is never recognised as an array.
+
+### The rules
 
 ```prolog
-#include "../clientlib/decompiler_imports.dl"
+StorageRead(func, cons) :-
+  StorageLoad(stmt, cons, _),
+  Statement_Block(stmt, block),
+  InFunction(block, func).
 
-.decl StorageRead(func: Function, slot: Value)
-.output StorageRead
-
-StorageRead(func, slot) :-
-  SLOAD(stmt, index, _),
-  Variable_Value(index, slot),
+StorageRead(func, cons) :-
+  StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
+  SLOAD(stmt, _, _),
   Statement_Block(stmt, block),
   InFunction(block, func).
 ```
 
-Read it as: *a function reads a slot if there is an `SLOAD` inside it whose
-slot operand is a variable with that constant value.* `:-` means "if", commas
-mean "and", and a variable repeated across clauses forces a join — `index`
-links the `SLOAD` to its constant, `stmt` links it to its block, `block` links
-that to its function. `_` is a wildcard for a column that does not matter, here
-the value loaded. `StorageWrite` is the same with `SSTORE`.
+Read the first as: *a function reads a construct if there is a storage load of it
+inside some block, and that block belongs to the function.* `:-` means "if", commas
+mean "and", and a variable repeated across clauses forces a join — `stmt` links the
+load to its block, `block` links that to its function. `_` is a wildcard for a
+column that does not matter, here the loaded variable.
 
-The client never names a file. `decompiler_imports.dl` declares each relation
-and binds it to a filename with `.input`; the `-F` flag supplies the directory.
-`SLOAD` is not read from anywhere — it is derived in `tac_instructions.dl` from
-`TAC_Op.csv`, `TAC_Def.csv` and `TAC_Use.csv`.
+Two rules sharing one head is Datalog's **or**: a row is derived if either rule
+derives it. There is no ordering and no "else". The second rule exists because
+`StorageLoad` only covers reads of a *value*; reading an array's length is
+classified separately, under the kind `$ArrayLength()`. The `SLOAD(stmt, _, _)`
+clause adds no new variable — it is a pure filter, and it is the only difference
+between the read rule and its `SSTORE` counterpart, since a kind of `$ArrayLength()`
+covers writes to the length too (`push`, `pop`).
 
-Output for `Max.sol`:
+`$Storage()` in the third position rejects `TLOAD`/`TSTORE`, the transient storage
+opcodes from EIP-1153, which share the same relation.
+
+`StorageWrite` is the same pair with `StorageStore` and `SSTORE`.
+
+The client never names a file. `decompiler_imports.dl` declares each relation and
+binds it to a filename with `.input`; the `-F` flag supplies the directory. `SLOAD`
+is not read from anywhere — it is derived in `tac_instructions.dl` from `TAC_Op.csv`,
+`TAC_Def.csv` and `TAC_Use.csv`.
+
+### Storage constructs
+
+The second output column is not a slot number but a `StorageConstruct`, an algebraic
+data type that describes arbitrarily nested state. Read the nesting as a path:
+
+| construct | meaning |
+|---|---|
+| `$Variable($Constant(0x2))` | the plain variable declared at slot 2 |
+| `$Array($Constant(0x0))` | the array declared at slot 0, as a whole |
+| `$Variable($Array($Constant(0x0)))` | an *element* of that array |
+| `$Variable($Mapping($Constant(0x3)))` | a value of the mapping at slot 3 |
+
+A slot number cannot express the third row. Slot 0 holds only the array's *length*;
+the elements live at `keccak256(0) + idx`, and `idx` is a runtime value, so there is
+no constant to print. That is why the output is a tree rather than a number, and it
+is what an earlier slot-based version of this client got wrong — it reported nothing
+for the write and a misleading `0x0` for the read.
+
+The construct deliberately does not record *which* index. A function writing both
+`array[i]` and `array[j]` produces one row, because all elements of an array are
+summarised as a single location. The per-statement index variable is still available
+from `StorageStmt_HighLevelUses` if that detail is needed.
+
+Gigahorse documents this type in `clientlib/storage_modeling/README.md`, which also
+links the paper describing the storage model.
+
+### Output for `Max.sol`
 
 ```
-=== storage reads (function, slot) ===
-0x2d	0x0
-0x2d	0x2
-0x2d	0x1
-=== storage writes (function, slot) ===
-0x2d	0x0
+=== storage reads (function, construct) ===
+0x2d	$Array($Constant(0x0))
+=== storage writes (function, construct) ===
+0x2d	$Variable($Array($Constant(0x0)))
 ```
 
-`0x2d` is the entry-block address of `max()`; the second column is a storage
-slot. Slots are assigned in declaration order, so this reads `b`, `a` and `c`
-and writes `b`. Four `SLOAD` instructions produce three rows because a Datalog
-relation is a set and slot 0 is read twice.
+`0x2d` is the entry-block address of `max(uint256)`. So the function reads the
+length of the array declared at slot 0 — the bounds check that reverts with
+`Panic(0x32)` when `idx >= length` — and writes one of its elements.
+
+For a contract of plain variables the same client reports them as
+`$Variable($Constant(0x0))`, `$Variable($Constant(0x1))` and so on, one row per
+distinct slot. Four `SLOAD` instructions can yield three rows, because a Datalog
+relation is a set and a slot read twice appears once.
 
 ## Analysing your own contract
 
@@ -327,6 +384,15 @@ programs compile in parallel and need roughly 2-3 GB each.
 An empty graph, or one missing most nodes — the output directory is wrong or
 stale. The scripts read `../.temp/<contract>/out`, which exists only after a
 successful `make`.
+
+`Undefined relation PHITrans` (58 of them) — `memory_modeling` is included after
+`storage_modeling` in `rw_client.dl`, or is missing. It must come first.
+
+`cannot find user-defined operator add_256` — the `-L ../souffle-addon` flag is
+missing from the souffle command.
+
+`Cannot open fact file TAC_Def.csv` — `.temp` does not exist. Run `make` once before
+running souffle on its own.
 
 After changing Souffle or rebuilding `souffle-addon`, always `rm -rf ../cache`
 first. The cache key is an MD5 of the Datalog source only, so it does not notice
