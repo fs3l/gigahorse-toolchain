@@ -465,3 +465,31 @@ running souffle on its own.
 After changing Souffle or rebuilding `souffle-addon`, always `rm -rf ../cache`
 first. The cache key is an MD5 of the Datalog source only, so it does not notice
 that the toolchain underneath it changed.
+
+## Note: measuring how long a run takes
+
+A single `make` varies enough between runs that one measurement is not worth
+much. To get an average over several runs — fish:
+
+```
+begin
+  for i in (seq 5)
+    /usr/bin/time -p make >/dev/null
+  end
+end 2>&1 | awk '/^real/{s+=$2; n++; printf "run %d: %.2f s\n", n, $2} END{printf "avg: %.3f s over %d runs\n", s/n, n}'
+```
+
+or bash / zsh:
+
+```
+for i in 1 2 3 4 5; do /usr/bin/time -p make >/dev/null; done 2>&1 \
+  | awk '/^real/{s+=$2; n++; printf "run %d: %.2f s\n", n, $2} END{printf "avg: %.3f s over %d runs\n", s/n, n}'
+```
+
+`/usr/bin/time -p` writes `real`, `user` and `sys` to stderr for each run; the
+surrounding block redirects the whole loop's stderr into `awk`, which prints each
+run and averages at the end.
+
+Run `make >/dev/null` once before measuring. The first run after a cold `../cache/`
+compiles the Datalog programs to native binaries and takes minutes, and including
+it would swamp the average. Every run afterwards is steady state.
