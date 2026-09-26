@@ -6,7 +6,7 @@ all:
 	cd .. && uv run ./gigahorse.py -C clients/visualizeout.py --restart mytests/Max.hex
 	python3 cfg.py > cfg.dot
 	dot -Tpng cfg.dot -o cfg.png
-	python3 dfg.py ../.temp/Max/out max > dfg.dot
+	python3 dfg.py ../.temp/Max/out foo > dfg.dot
 	dot -Tpng dfg.dot -o dfg.png
 	open cfg.png dfg.png
 	cat ../.temp/Max/out/contract.tac

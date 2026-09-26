@@ -1,31 +1,42 @@
 #include "../clientlib/decompiler_imports.dl"
-  #include "../clientlib/memory_modeling/memory_modeling.dl"
-  #include "../clientlib/storage_modeling/storage_modeling.dl"
+#include "../clientlib/memory_modeling/memory_modeling.dl"
+#include "../clientlib/storage_modeling/storage_modeling.dl"
 
-  .decl StorageRead(func: Function, cons: StorageConstruct)
-  .output StorageRead
+.decl ConstCondJump(block: Block, alwaysTaken: number)
+ConstCondJump(block, 1) :- JUMPI(s, _, cond), Statement_Block(s, block), Variable_Value(cond, v), v != "0x0".
+ConstCondJump(block, 0) :- JUMPI(s, _, cond), Statement_Block(s, block), Variable_Value(cond, "0x0").
 
-  StorageRead(func, cons) :-
-    StorageLoad(stmt, cons, _),
-    Statement_Block(stmt, block),
-    InFunction(block, func).
+.decl InfeasibleEdge(from: Block, to: Block)
+InfeasibleEdge(f, t) :- ConstCondJump(f, 1), FallthroughEdge(f, t).
+InfeasibleEdge(f, t) :- ConstCondJump(f, 0), LocalBlockEdge(f, t), !FallthroughEdge(f, t).
 
-  StorageRead(func, cons) :-
-    StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
-    SLOAD(stmt, _, _),
-    Statement_Block(stmt, block),
-    InFunction(block, func).
+.decl FeasibleEdge(from: Block, to: Block)
+FeasibleEdge(f, t) :- LocalBlockEdge(f, t), !InfeasibleEdge(f, t).
 
-  .decl StorageWrite(func: Function, cons: StorageConstruct)
-  .output StorageWrite
+.decl ReachableBlock(block: Block)
+ReachableBlock(b) :- FunctionEntry(b).
+ReachableBlock(t) :- ReachableBlock(f), FeasibleEdge(f, t).
 
-  StorageWrite(func, cons) :-
-    StorageStore(stmt, cons, _),
-    Statement_Block(stmt, block),
-    InFunction(block, func).
+.decl StorageRead(func: Function, cons: StorageConstruct)
+.output StorageRead
 
-  StorageWrite(func, cons) :-
-    StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
-    SSTORE(stmt, _, _),
-    Statement_Block(stmt, block),
-    InFunction(block, func).
+StorageRead(func, cons) :-
+  StorageLoad(stmt, cons, _),
+  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).
+
+StorageRead(func, cons) :-
+  StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
+  SLOAD(stmt, _, _),
+  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).
+
+.decl StorageWrite(func: Function, cons: StorageConstruct)
+.output StorageWrite
+
+StorageWrite(func, cons) :-
+  StorageStore(stmt, cons, _),
+  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).
+
+StorageWrite(func, cons) :-
+  StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
+  SSTORE(stmt, _, _),
+  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).

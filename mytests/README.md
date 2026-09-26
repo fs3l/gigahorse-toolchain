@@ -131,13 +131,13 @@ graphs described in steps 7 and 8, opens them, and prints the lifted
 three-address IR:
 
 ```
-function max(uint256)() public {
-    Begin block 0x2d
-    prev=[], succ=[0xbbB0x2d]
+function foo()() public {
+    Begin block 0x43
+    prev=[], succ=[0x61B0x43]
     =================================
-    0x2e: v2e(0x47) = CONST
-    0x31: v31(0x4) = CONST
-    0x34: v34 = CALLDATASIZE
+    0x44: v44(0x4b) = CONST
+    0x47: v47(0x61) = CONST
+    0x4a: JUMP v47(0x61)
     ...
 ```
 
@@ -173,7 +173,15 @@ solid black    jump
 dashed black   fallthrough
 bold blue      call into a private function
 dotted blue    return from a private function
+dashed red     edge that can never be taken
+grey box       block that can never execute
 ```
+
+`cfg.py` works out the grey blocks itself, from the decompiler's own relations,
+and reads nothing from `rw_client.dl`. That is deliberate: the graph is what the
+analysis gets checked against, so it must not be drawn from the analysis's own
+conclusions. Dead blocks are marked rather than removed, so the `JUMPI` that
+killed them stays on the page next to them as the evidence.
 
 Functions are drawn as labelled boxes. Alongside the contract's own functions
 you will see `__function_selector__` (the dispatcher solc generates to route
@@ -267,18 +275,72 @@ hashing it — `MSTORE 0x0, 0x0` then `SHA3 0x0, 0x20`. Connecting those two
 statements is memory modeling. Without it the `SHA3` cannot be tied to the value
 being hashed, and the array is never recognised as an array.
 
+### Reachability
+
+Before the read/write rules run, the client works out which blocks can actually
+execute. Gigahorse's constant folding often resolves a branch condition to a
+literal, but the decompiler still emits both successors, so an `if (23 < 15)`
+body sits in the CFG as ordinary code. These rules remove it.
+
+```prolog
+.decl ConstCondJump(block: Block, alwaysTaken: number)
+ConstCondJump(block, 1) :- JUMPI(s, _, cond), Statement_Block(s, block), Variable_Value(cond, v), v != "0x0".
+ConstCondJump(block, 0) :- JUMPI(s, _, cond), Statement_Block(s, block), Variable_Value(cond, "0x0").
+
+.decl InfeasibleEdge(from: Block, to: Block)
+InfeasibleEdge(f, t) :- ConstCondJump(f, 1), FallthroughEdge(f, t).
+InfeasibleEdge(f, t) :- ConstCondJump(f, 0), LocalBlockEdge(f, t), !FallthroughEdge(f, t).
+
+.decl FeasibleEdge(from: Block, to: Block)
+FeasibleEdge(f, t) :- LocalBlockEdge(f, t), !InfeasibleEdge(f, t).
+
+.decl ReachableBlock(block: Block)
+ReachableBlock(b) :- FunctionEntry(b).
+ReachableBlock(t) :- ReachableBlock(f), FeasibleEdge(f, t).
+```
+
+`ConstCondJump` finds a `JUMPI` whose condition Gigahorse already folded to a
+constant. `InfeasibleEdge` then kills the successor that cannot be taken, and
+`ReachableBlock` walks from every function entry over the surviving edges.
+
+Solc inverts every source condition with `ISZERO` so that the fallthrough is the
+then-branch, which is why the two polarities look reversed:
+
+| source | after `ISZERO` | `ConstCondJump` | edge that dies |
+|---|---|---|---|
+| `if (15 > 13)` — true | `0` | `(block, 0)` | the **jump** edge, i.e. the skip path |
+| `if (23 < 15)` — false | `1` | `(block, 1)` | the **fallthrough**, i.e. the body |
+
+`Max.sol` contains one of each, so both rules of each pair are exercised. In
+`bar()`:
+
+```
+0xc4S0x57: vc4V57(0x0) = LT vc2V57(0x17), vc0V57(0xf)    23 < 15  -> 0
+0xc5S0x57: vc5V57(0x1) = ISZERO vc4V57(0x0)                       -> 1
+0xc9S0x57: JUMPI vc6V57(0x42f6), vc5V57(0x1)
+```
+
+giving `ConstCondJump(0xbfB0x57, 1)`, then `InfeasibleEdge(0xbfB0x57, 0xcaB0x57)`,
+which kills the block holding the `SLOAD` of `c`, the block holding its `SSTORE`,
+and the join after them.
+
 ### The rules
+
+Each read/write rule carries one extra clause, `ReachableBlock(block)`, so a
+storage statement in dead code contributes nothing.
 
 ```prolog
 StorageRead(func, cons) :-
   StorageLoad(stmt, cons, _),
   Statement_Block(stmt, block),
+  ReachableBlock(block),
   InFunction(block, func).
 
 StorageRead(func, cons) :-
   StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
   SLOAD(stmt, _, _),
   Statement_Block(stmt, block),
+  ReachableBlock(block),
   InFunction(block, func).
 ```
 
@@ -334,21 +396,27 @@ links the paper describing the storage model.
 
 ### Output for `Max.sol`
 
+`Max.sol` holds three functions: `pos()` guarded by `if (b > c)`, `foo()` by
+`if (15 > 13)`, and `bar()` by `if (23 < 15)`. Slots follow declaration order, so
+`b` is `0x0` and `c` is `0x1`.
+
 ```
 === storage reads (function, construct) ===
-0x2d	$Array($Constant(0x0))
+0x43	$Variable($Constant(0x0))
+0x4d	$Variable($Constant(0x0))
+0x4d	$Variable($Constant(0x1))
 === storage writes (function, construct) ===
-0x2d	$Variable($Array($Constant(0x0)))
+0x43	$Variable($Constant(0x0))
+0x4d	$Variable($Constant(0x0))
+0x4d	$Variable($Constant(0x1))
 ```
 
-`0x2d` is the entry-block address of `max(uint256)`. So the function reads the
-length of the array declared at slot 0 — the bounds check that reverts with
-`Panic(0x32)` when `idx >= length` — and writes one of its elements.
+`0x43` is `foo()` and `0x4d` is `pos()`. `bar()` is `0x57` and does not appear at
+all: its guard is decided, so its body never runs and it touches no storage.
+`cfg.py` greys the same four blocks, having reached that conclusion separately.
 
-For a contract of plain variables the same client reports them as
-`$Variable($Constant(0x0))`, `$Variable($Constant(0x1))` and so on, one row per
-distinct slot. Four `SLOAD` instructions can yield three rows, because a Datalog
-relation is a set and a slot read twice appears once.
+`pos()` stays in full. Its guard reads storage, so it cannot be decided — `foo()`
+increments `b` on every call, and after enough calls `b > c` becomes true.
 
 ## Analysing your own contract
 

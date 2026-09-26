@@ -14,6 +14,15 @@ notation contract.tac uses, so a block here can be read against the matching
     dashed black   fallthrough
     bold blue      call into a private function
     dotted blue    return from a private function
+    dashed red     edge that can never be taken
+    grey box       block that can never execute
+
+Dead code is greyed rather than removed, so that a wrong reachability result is
+visible instead of silently absent, and so the JUMPI that killed a block stays
+next to it as the evidence. Unreachable code is found here, from the
+decompiler's own relations, and not by reading any client's output -- so this
+picture stays an independent check on the analysis rather than a restatement
+of it.
 
 This script computes nothing. It reads Gigahorse's CSV relations, joins them,
 and prints text in the DOT language.
@@ -120,6 +129,49 @@ def statement(stmt):
     return f"{stmt}: {out} = {body}" if out else f"{stmt}: {body}"
 
 
+# --- reachability ------------------------------------------------------------
+# A JUMPI whose condition is a known constant has one successor that can never
+# be taken. Everything only reachable through such an edge is dead code.
+
+successors = {}
+for a, b in edges:
+    successors.setdefault(a, []).append(b)
+
+# block -> True if the jump is always taken, False if it is never taken
+const_cond = {}
+for stmt, op in op_of.items():
+    if op != "JUMPI":
+        continue
+    operands = dict(uses_by_stmt.get(stmt, []))
+    cond = operands.get(1)          # operand 0 is the target, operand 1 the condition
+    val = value_of.get(cond) if cond else None
+    if val is not None:
+        const_cond[block_of[stmt]] = int(val, 16) != 0
+
+infeasible = set()
+for a, b in edges:
+    if a not in const_cond:
+        continue
+    is_fallthrough = (a, b) in fallthrough
+    # condition always true -> the fallthrough dies; always false -> the jump dies
+    if const_cond[a] == is_fallthrough:
+        infeasible.add((a, b))
+
+# Every function id is also that function's entry block, so the function ids are
+# the roots. Private functions are entered by CALLPRIVATE, not a block edge,
+# which is why each one needs to be a root of its own.
+reachable = set(funcs)
+stack = list(reachable)
+while stack:
+    block = stack.pop()
+    for nxt in successors.get(block, []):
+        if (block, nxt) in infeasible or nxt in reachable:
+            continue
+        reachable.add(nxt)
+        stack.append(nxt)
+
+dead = {b for b in in_func if b not in reachable}
+
 # --- emit the DOT file ------------------------------------------------------
 
 print("digraph CFG {")
@@ -135,13 +187,19 @@ for i, (func, blocks) in enumerate(sorted(funcs.items())):
         lines = [statement(s) for s in sorted(stmts_by_block.get(block, []), key=address)]
         # \l is "newline, left-justified"; plain \n would centre every line.
         body = "\\l".join(lines)
-        print(f'    "{block}" [label="{block}\\l{body}\\l"];')
+        extra = ' style="filled,dashed" fillcolor="#ebebeb" color="gray50"' if block in dead else ""
+        print(f'    "{block}" [label="{block}\\l{body}\\l"{extra}];')
     print("  }")
 
 # Edges are printed after the clusters. A node belongs to whichever cluster
 # declared it, so edges may appear anywhere in the file.
 for a, b in edges:
-    style = " [style=dashed]" if (a, b) in fallthrough else ""
+    if (a, b) in infeasible:
+        style = ' [style=dashed color=red]'
+    elif (a, b) in fallthrough:
+        style = " [style=dashed]"
+    else:
+        style = ""
     print(f'  "{a}" -> "{b}"{style};')
 
 # Call edges: caller block -> callee's entry block.
