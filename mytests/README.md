@@ -1,7 +1,7 @@
 # Running Gigahorse on macOS
 
 Every command needed, from a fresh machine to the decompiled output of
-`mytests/Max.sol`, its control-flow graph and its data-flow graph.
+`mytests/Max.sol` and its control-flow graph.
 Tested on macOS (Apple Silicon).
 
 ## Pipeline
@@ -17,8 +17,8 @@ them in order.
 | 3 | decompile | `logic/main.dl` via Souffle | `.temp/Max/*.facts` | `.temp/Max/out/*.csv` (~95 files) |
 | 4 | inline | `clientlib/function_inliner.dl` via Souffle | `.temp/Max/out/*.csv` | overwrites 26 of them |
 | 5a | pretty-print | `clients/visualizeout.py` | `out/*.csv` | `contract.tac` |
-| 5b | draw graphs | `cfg.py`, `dfg.py` | `out/*.csv` | `cfg.png`, `dfg.png` |
-| 5c | analyse | `rw_client.dl` via Souffle | `out/*.csv` | `StorageRead.csv`, `StorageWrite.csv` |
+| 5b | draw the graph | `cfg.py` | `out/*.csv` | `cfg.png` |
+| 5c | analyse | `rw_client.dl` via Souffle | `out/*.csv` | `out/StorageRead.csv`, `out/StorageWrite.csv`, `out/BranchCondition.csv`, `out/CondDependsOn.csv` |
 
 The whole input to the analysis is stage 2's output: a disassembly expressed as
 three tables — offset to opcode, offset to next offset, offset to pushed
@@ -126,22 +126,24 @@ cd mytests
 make
 ```
 
-`make` compiles `Max.sol` to runtime bytecode, decompiles it, draws the two
-graphs described in steps 7 and 8, opens them, and prints the lifted
-three-address IR:
+`make` compiles `Max.sol` to runtime bytecode, decompiles it, draws the
+control-flow graph described in step 7, opens it, prints the lifted three-address
+IR, and then prints the four analysis results described in step 8.
 
 ```
-function foo()() public {
-    Begin block 0x43
-    prev=[], succ=[0x61B0x43]
+function 0x4c970b2f() public {
+    Begin block 0x38
+    prev=[], succ=[0xfeB0x38]
     =================================
-    0x44: v44(0x4b) = CONST
-    0x47: v47(0x61) = CONST
-    0x4a: JUMP v47(0x61)
+    0x39: v39(0x52) = CONST
+    0x3c: v3c(0x4) = CONST
+    0x3f: v3f = CALLDATASIZE
     ...
 ```
 
-The listing is also saved to `../.temp/Max/out/contract.tac`.
+The listing is also saved to `../.temp/Max/out/contract.tac`. A public function is
+named by its 4-byte selector when Gigahorse cannot recover the source name —
+`0x4c970b2f` here is `foo(int256)`.
 
 The first run compiles four Datalog programs to native binaries and takes about
 two minutes. They are cached in `../cache/`, so later runs take a few seconds.
@@ -152,6 +154,8 @@ To start over:
 make clean
 make
 ```
+
+Set `NAME` at the top of the `Makefile` if the contract is not called `Max`.
 
 ## 7. Control-flow graph (CFG)
 
@@ -196,50 +200,7 @@ other than `Max`:
 python3 cfg.py ../.temp/Foo/out > cfg.dot
 ```
 
-## 8. Data-flow graph (DFG)
-
-How values move. Nodes are individual statements, edges run from the single
-statement that defines a variable to each statement that uses it. The IR is in
-SSA form — every variable has exactly one definition — so these edges are exact
-rather than approximate.
-
-```
-python3 dfg.py ../.temp/Max/out max > dfg.dot
-dot -Tpng dfg.dot -o dfg.png
-open dfg.png
-```
-
-The second argument filters to functions whose name contains that text. Drop it
-to draw every function, which is considerably larger.
-
-Storage and memory operations are colour-filled, since they are what a
-read/write set is built from:
-
-```
-blue      SLOAD    storage read
-red       SSTORE   storage write
-green     MLOAD    memory read
-yellow    MSTORE   memory write
-```
-
-Node labels match `cfg.py` and `contract.tac` line for line, so the three views
-can be read against each other: a CFG node is one block, and each line inside it
-is one DFG node.
-
-```
-contract.tac                    cfg.py node 0x4b         dfg.py nodes
-0x51: v51 = SLOAD v4f(0x2)  ->  same line in the box  ->  node "0x51"
-0x52: v52 = GT v51, v4d(0x1)    same line in the box      node "0x52"
-```
-
-Expect the DFG to fall into several disconnected islands. That is correct, not a
-defect: def-use edges follow *variables*, and three things move values by other
-means — storage (`SSTORE` to a slot, then `SLOAD` of the same slot), calls
-(an argument becomes a different variable inside the callee), and control flow
-(a `JUMPI` decides which island executes). The first of those is what a
-read/write set captures.
-
-## 9. Storage read/write set
+## 8. Storage read/write set
 
 Which storage locations the contract reads and writes. This is the only piece that
 is an *analysis* rather than a rendering: `rw_client.dl` is a Souffle Datalog
@@ -249,9 +210,10 @@ program, run over the same relations the graphs are drawn from.
 least once first:
 
 ```
-souffle -F ../.temp/Max/out -D . -L ../souffle-addon rw_client.dl \
+mkdir -p out
+souffle -F ../.temp/Max/out -D out -L ../souffle-addon rw_client.dl \
         -M "GIGAHORSE_DIR=$(cd .. && pwd)/ BULK_ANALYSIS="
-cat StorageRead.csv StorageWrite.csv
+cat out/StorageRead.csv out/StorageWrite.csv out/BranchCondition.csv out/CondDependsOn.csv
 ```
 
 `-F` is the fact directory that every `.input` reads from, `-D` is where `.output`
@@ -261,13 +223,19 @@ to the C preprocessor: `GIGAHORSE_DIR` so the includes can locate the functor
 declarations, and `BULK_ANALYSIS=` to suppress the library's debug outputs.
 Omitting the latter produces stray `Fail.csv` and `PublicFunctionId.csv` files.
 
-### The three includes
+`-D out` rather than `-D .` matters: Gigahorse's libraries write roughly fifty
+`DEBUG_OUTPUT` relations wherever `-D` points, and with `.` they land in
+`mytests`. Keeping them in `out/` leaves the directory readable, and `make clean`
+removes the whole thing.
+
+### The four includes
 
 | include | why it is there |
 |---|---|
 | `decompiler_imports.dl` | binds each `.csv` to a relation, and derives the per-opcode relations (`SLOAD`, `SSTORE`) along with `Statement_Block` and `InFunction` |
 | `memory_modeling` | never referenced directly, but `storage_modeling` depends on it. It must come **first**, or the build fails with 58 `Undefined relation PHITrans` errors |
 | `storage_modeling` | the storage analysis proper: `StorageConstruct`, `StorageLoad`, `StorageStore`, `StorageStmtKindAndConstruct` |
+| `flows.dl` | Gigahorse's customisable data-flow framework. Used here for `DataFlows`, the inter-procedural value-reachability relation |
 
 `memory_modeling` is load-bearing rather than incidental. A dynamic array element
 lives at `keccak256(slot) + idx`, and solc writes the slot into *memory* before
@@ -394,29 +362,93 @@ from `StorageStmt_HighLevelUses` if that detail is needed.
 Gigahorse documents this type in `clientlib/storage_modeling/README.md`, which also
 links the paper describing the storage model.
 
+### Def-ref chain: what each condition depends on
+
+`CondDependsOn` answers "which storage slot or which function argument feeds this
+branch condition".
+
+```prolog
+CondDependsOn(cond, name) :-
+  JUMPI(_, _, cond),
+  StorageLoad(_, cons, loaded),
+  DataFlows(loaded, cond),
+  Construct_TopLevelName($Storage(), cons, name).
+
+CondDependsOn(cond, cat("arg", to_string(i))) :-
+  JUMPI(_, _, cond),
+  PublicFunctionArg(_, a, i),
+  DataFlows(a, cond).
+```
+
+`DataFlows(from, to)` means the value of `from` reaches `to`. It is the
+**inter-procedural** relation, which matters because Solidity 0.8 compiles `x++`
+into a call to an overflow-checked helper — so the chain `x = c` → `x++` → `x > y`
+leaves the function and comes back. `DependsOn` is the intra-procedural version
+and finds nothing across such a call.
+
+It tracks the flow of values.
+
+### Expanding a condition into an expression
+
+`BranchCondition` prints the condition itself rather than its dependencies:
+
+```
+0x84V0x4d    ((stor0x1 + 0x1) > (arg0 - 0x1))
+```
+
+which reads `c + 1 > y - 1`. Three pieces make that possible.
+
+`HelperOp` recognises what one of solc's arithmetic helpers computes. `x++` is not
+an `ADD` in the bytecode — it is a `CALLPRIVATE`, and the `+ 1` is a constant
+*inside* the callee rather than an argument.
+
+`Expr2` then gives one shape for "this variable is `op(x, y)`", covering both an
+inline instruction and a call to such a helper, so everything downstream can treat
+the call as arithmetic.
+
+`Desc` names one value — a constant, a storage variable via
+`Construct_TopLevelName`, an argument as `argN`, or a bracketed expression built
+recursively from those.
+
+Finally `BranchCondition` peels off solc's `ISZERO`. Solc inverts every source
+condition so that the fall-through is the then-branch, so without this the printed
+comparison would be the negation of the one in the source.
+
 ### Output for `Max.sol`
 
-`Max.sol` holds three functions: `pos()` guarded by `if (b > c)`, `foo()` by
-`if (15 > 13)`, and `bar()` by `if (23 < 15)`. Slots follow declaration order, so
+`Max.sol` holds `foo(int y)`, whose body is `int x = c; x++; y--; if (x > y) b++;`,
+and `bar()`, whose body is `if (23 < 15) c++;`. Slots follow declaration order, so
 `b` is `0x0` and `c` is `0x1`.
 
 ```
 === storage reads (function, construct) ===
-0x43	$Variable($Constant(0x0))
-0x4d	$Variable($Constant(0x0))
-0x4d	$Variable($Constant(0x1))
+0x38	$Variable($Constant(0x1))
+0x38	$Variable($Constant(0x0))
 === storage writes (function, construct) ===
-0x43	$Variable($Constant(0x0))
-0x4d	$Variable($Constant(0x0))
-0x4d	$Variable($Constant(0x1))
+0x38	$Variable($Constant(0x0))
+=== branch conditions, expanded ===
+0x84V0x4d	((stor0x1 + 0x1) > (arg0 - 0x1))
+0xdfV0xeaV0x113V0x38	(arg0 == arg0)
+0x1ccV0x4d	(arg0 - 0x8000000000000000000000000000000000000000000000000000000000000000)
+0xa9V0x54	0x1
+=== what each condition depends on ===
+0x84V0x4d	stor0x1
+0x84V0x4d	stor0x0
+0x84V0x4d	arg0
 ```
 
-`0x43` is `foo()` and `0x4d` is `pos()`. `bar()` is `0x57` and does not appear at
-all: its guard is decided, so its body never runs and it touches no storage.
-`cfg.py` greys the same four blocks, having reached that conclusion separately.
+`0x38` is `foo(int256)`. It reads `c` and both reads and writes `b`. `bar()` does
+not appear at all: `23 < 15` is false in every context, so its write to `c` is
+unreachable. `cfg.py` greys the same blocks, having worked that out separately.
 
-`pos()` stays in full. Its guard reads storage, so it cannot be decided — `foo()`
-increments `b` on every call, and after enough calls `b > c` becomes true.
+`0x84V0x4d` is `foo`'s `if (x > y)`, and `stor0x1` is `c`, `arg0` is the original
+`y`. The other three rows are conditions solc inserts rather than ones written in
+the source: the `int256` sign-extension check, the `y--` underflow check against
+`INT256_MIN`, and `bar()`'s already-folded `23 < 15`.
+
+Variable names differ between these files and the CFG picture: the relations write
+`0x84V0x4d`, while `contract.tac` and `cfg.py` write `v84V4d`. Strip every `0x` and
+prefix a `v`.
 
 ## Analysing your own contract
 
@@ -429,8 +461,8 @@ make clean
 make
 ```
 
-The `make` rule passes `max` as the DFG's function filter. If your function has
-a different name, update that line or the data-flow graph will come out empty.
+Set `NAME` at the top of the `Makefile` if the contract is not called `Max`.
+
 
 ## Troubleshooting
 

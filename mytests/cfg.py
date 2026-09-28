@@ -8,7 +8,7 @@ Default out-dir is ../.temp/Max/out.
 
 Each node is a basic block showing its full statement list, in the same
 notation contract.tac uses, so a block here can be read against the matching
-"Begin block" section there and against the nodes of dfg.py.
+"Begin block" section there.
 
     solid black    jump
     dashed black   fallthrough
