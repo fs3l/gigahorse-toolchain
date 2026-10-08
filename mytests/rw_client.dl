@@ -21,26 +21,12 @@ ReachableBlock(t) :- ReachableBlock(f), FeasibleEdge(f, t).
 .decl StorageRead(func: Function, cons: StorageConstruct)
 .output StorageRead
 
-StorageRead(func, cons) :-
-  StorageLoad(stmt, cons, _),
-  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).
-
-StorageRead(func, cons) :-
-  StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
-  SLOAD(stmt, _, _),
-  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).
+StorageRead(f, c) :- Access(f, "R", c, _).
 
 .decl StorageWrite(func: Function, cons: StorageConstruct)
 .output StorageWrite
 
-StorageWrite(func, cons) :-
-  StorageStore(stmt, cons, _),
-  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).
-
-StorageWrite(func, cons) :-
-  StorageStmtKindAndConstruct(stmt, $ArrayLength(), $Storage(), cons),
-  SSTORE(stmt, _, _),
-  Statement_Block(stmt, block), ReachableBlock(block), InFunction(block, func).
+StorageWrite(f, c) :- Access(f, "W", c, _).
 
 .decl CondDependsOn(cond: Variable, source: symbol)
 .output CondDependsOn
@@ -48,13 +34,13 @@ StorageWrite(func, cons) :-
 CondDependsOn(cond, name) :-
   JUMPI(_, _, cond),
   StorageLoad(_, cons, loaded),
-  DataFlows(loaded, cond),
+  Reaches(loaded, cond),
   Construct_TopLevelName($Storage(), cons, name).
 
 CondDependsOn(cond, cat("arg", to_string(i))) :-
   JUMPI(_, _, cond),
   PublicFunctionArg(_, a, i),
-  DataFlows(a, cond).
+  Reaches(a, cond).
 
 .decl HelperOp(f: Function, op: symbol, p: number, k: Variable)
 HelperOp(f,"ADD",p,k) :- FormalReturnArgs(f,r,0), ADD(_,a,k,r), FormalArgs(f,a,p), Variable_Value(k,_).
@@ -78,13 +64,171 @@ Sym("SGT",">"). Sym("SLT","<"). Sym("GT",">"). Sym("LT","<"). Sym("EQ","==").
 
 .decl Desc(v: Variable, d: symbol)
 Desc(v,val) :- Variable_Value(v,val).
-Desc(v,nm)  :- StorageLoad(_,cons,v), !Variable_Value(v,_),
+Desc(v,nm)  :- StorageLoad(_,cons,v), !Variable_Value(v,_), !StorageFlow(_,v),
                Construct_TopLevelName($Storage(),cons,nm).
+Desc(v,d)   :- StorageFlow(src,v), !Variable_Value(v,_), Desc(src,d).
 Desc(v,cat("arg",to_string(i))) :- PublicFunctionArg(_,v,i), !Variable_Value(v,_).
+Desc(v, cat("length(", cat(sl, ")"))) :-
+  StorageStmtKindAndConstruct(st, $ArrayLength(), $Storage(), c), SLOAD(st, _, v),
+  !Variable_Value(v, _), SlotName(c, sl).
 Desc(t, cat("(",cat(dx,cat(" ",cat(s,cat(" ",cat(dy,")"))))))) :-
   Expr2(t,op,x,y), Sym(op,s), !Variable_Value(t,_), Desc(x,dx), Desc(y,dy).
+
+Desc(m, cat("(",cat(e,cat(" ? ",cat(dt,cat(" : ",cat(df,")"))))))) :-
+  PhiArmCount(p, 2), PhiArm(p, m, ut, bt), PhiArm(p, m, uf, bf),
+  GuardHolds(j, bt, e, 1), GuardHolds(j, bf, e, 0), !RevertCheck(j),
+  Desc(ut, dt), Desc(uf, df).
 
 .decl BranchCondition(cond: Variable, expr: symbol)
 .output BranchCondition
 BranchCondition(c, e) :- JUMPI(_,_,c), Desc(c,e).
 BranchCondition(c, e) :- JUMPI(_,_,c), ISZERO(_,z,c), Desc(z,e).
+
+.decl AccessAt(func: Function, op: symbol, cons: StorageConstruct, stmt: Statement, block: Block)
+AccessAt(f, o, c, s, b) :- RawAccess(o, s, c), Statement_Block(s, b), ReachableBlock(b), InFunction(b, f).
+
+.decl Access(func: Function, op: symbol, cons: StorageConstruct, block: Block)
+Access(f, o, c, b) :- AccessAt(f, o, c, _, b).
+
+.decl RawAccess(op: symbol, stmt: Statement, cons: StorageConstruct)
+RawAccess("R", s, c) :- StorageLoad(s, c, _).
+RawAccess("W", s, c) :- StorageStore(s, c, _).
+RawAccess("R", s, c) :- StorageStmtKindAndConstruct(s, $ArrayLength(), $Storage(), c), SLOAD(s, _, _).
+RawAccess("W", s, c) :- StorageStmtKindAndConstruct(s, $ArrayLength(), $Storage(), c), SSTORE(s, _, _).
+
+.decl NormalExit(block: Block)
+NormalExit(b) :- FunctionExit(b), !ThrowBlock(b).
+
+.decl CanReachNormalExit(block: Block)
+CanReachNormalExit(w) :- LocalBlockCanReach(w, e), NormalExit(e).
+
+.decl RevertCheck(jumpi: Statement)
+RevertCheck(j) :- ( DecisionEdge(j, w, _) ; DecisionEdge(j, _, w) ), !CanReachNormalExit(w).
+
+.decl GuardPolarity(jumpi: Statement, block: Block, taken: number)
+GuardPolarity(j, y, 1) :- DecisionEdge(j, w1, w2), LocalBlockCanReach(w1, y), !LocalBlockCanReach(w2, y).
+GuardPolarity(j, y, 0) :- DecisionEdge(j, w1, w2), LocalBlockCanReach(w2, y), !LocalBlockCanReach(w1, y).
+
+.decl ConstDecided(jumpi: Statement)
+ConstDecided(j) :- JUMPI(j, _, _), Statement_Block(j, b), ConstCondJump(b, _).
+
+.decl RealGuard(jumpi: Statement, block: Block)
+RealGuard(j, b) :- ControlsWith(j, b, _), !RevertCheck(j), !ConstDecided(j).
+
+.decl Inverted(cond: Variable)
+Inverted(c) :- JUMPI(_, _, c), ISZERO(_, _, c).
+
+.decl PhiArm(phi: Statement, merged: Variable, use: Variable, defBlock: Block)
+PhiArm(p, m, u, b) :-
+  Statement_Opcode(p, "PHI"), Statement_Defines(p, m, _),
+  Statement_Uses(p, u, _), Statement_Defines(d, u, _), Statement_Block(d, b).
+
+.decl PhiArmCount(phi: Statement, n: number)
+PhiArmCount(p, n) :- Statement_Opcode(p, "PHI"), n = count : { Statement_Uses(p, _, _) }.
+
+.decl PhiControlDep(merged: Variable, cond: Variable)
+.output PhiControlDep
+PhiControlDep(m, cv) :-
+  Statement_Opcode(p, "PHI"), Statement_Defines(p, m, _), Statement_Block(p, join),
+  LocalBlockEdge(b1, join), LocalBlockEdge(b2, join), b1 != b2,
+  ControlsWith(j, b1, cv), !RevertCheck(j),
+  GuardPolarity(j, b1, 1), GuardPolarity(j, b2, 0).
+
+.decl StorageFlow(stored: Variable, loaded: Variable)
+.output StorageFlow
+StorageFlow(v, out) :-
+  StorageStore(st, cons, w), w = $VariableWrite(v),
+  StorageLoad(ld, cons, out), HappensAfter(ld, st).
+
+.decl Reaches(from: Variable, to: Variable)
+Reaches(a, b) :- DataFlows(a, b).
+Reaches(a, b) :- PhiControlDep(b, a).
+Reaches(a, b) :- StorageFlow(a, b).
+Reaches(a, b) :- Reaches(a, mid), Reaches(mid, b).
+
+.decl GuardHolds(jumpi: Statement, block: Block, expr: symbol, holds: number)
+GuardHolds(j, b, e, p)     :- GuardPolarity(j, b, p), JUMPI(j, _, c), BranchCondition(c, e), !Inverted(c).
+GuardHolds(j, b, e, 1 - p) :- GuardPolarity(j, b, p), JUMPI(j, _, c), BranchCondition(c, e),  Inverted(c).
+
+.decl GuardWord(holds: number, word: symbol)
+GuardWord(1, ""). GuardWord(0, "NOT ").
+
+.decl GuardExpressible(jumpi: Statement, block: Block)
+GuardExpressible(j, b) :- GuardHolds(j, b, _, _).
+
+.decl PhiCase(merged: Variable, value: symbol, cond: symbol)
+.output PhiCase
+PhiCase(m, dv, cat(w, e)) :-
+  PhiArm(_, m, u, b), GuardHolds(j, b, e, h), !RevertCheck(j),
+  GuardWord(h, w), Desc(u, dv).
+
+.decl UnguardedAccess(func: Function, op: symbol, cons: StorageConstruct)
+.output UnguardedAccess
+UnguardedAccess(f, o, c) :- Access(f, o, c, b), !RealGuard(_, b).
+UnguardedAccess(f, o, c) :- Access(f, o, c, b), RealGuard(j, b), !GuardExpressible(j, b).
+
+.decl GuardedAccess(func: Function, op: symbol, cons: StorageConstruct, cond: symbol)
+.output GuardedAccess
+GuardedAccess(f, o, c, cat(w, e)) :-
+  Access(f, o, c, b), RealGuard(j, b), GuardHolds(j, b, e, h), GuardWord(h, w).
+
+.decl SlotName(cons: StorageConstruct, slot: symbol)
+SlotName(c, substr(n, 4, strlen(n) - 4)) :- Construct_TopLevelName($Storage(), c, n), match("stor.*", n).
+SlotName(c, substr(n, 5, strlen(n) - 5)) :- Construct_TopLevelName($Storage(), c, n), match("array.*", n).
+SlotName(c, substr(n, 7, strlen(n) - 7)) :- Construct_TopLevelName($Storage(), c, n), match("mapping.*", n).
+SlotName(c, "?") :- Access(_, _, c, _), !Construct_TopLevelName($Storage(), c, _).
+
+.decl AccessIndex(stmt: Statement, idx: symbol)
+AccessIndex(s, d) :- StorageStmt_HighLevelUses(s, v, _, _, _), Desc(v, d).
+AccessIndex(s, "?") :- StorageStmt_HighLevelUses(s, v, _, _, _), !Desc(v, _).
+
+.decl SlotOf(stmt: Statement, cons: StorageConstruct, slot: symbol)
+SlotOf(s, c, cat(b, cat("[", cat(i, "]")))) :- AccessAt(_, _, c, s, _), SlotName(c, b), AccessIndex(s, i).
+SlotOf(s, c, b) :- AccessAt(_, _, c, s, _), SlotName(c, b), !AccessIndex(s, _).
+
+.decl RWSet(func: Function, op: symbol, slot: symbol, cond: symbol)
+.output RWSet
+RWSet(f, o, sl, "always")   :- AccessAt(f, o, c, s, b), SlotOf(s, c, sl), !RealGuard(_, b).
+RWSet(f, o, sl, "always")   :- AccessAt(f, o, c, s, b), SlotOf(s, c, sl), RealGuard(j, b), !GuardExpressible(j, b).
+RWSet(f, o, sl, cat(w, e))  :- AccessAt(f, o, c, s, b), SlotOf(s, c, sl), RealGuard(j, b),
+                               GuardHolds(j, b, e, h), GuardWord(h, w).
+
+.decl VacuousCond(cond: Variable)
+VacuousCond(t) :- Expr2(t, "EQ", x, y), Desc(x, d), Desc(y, d).
+
+.decl VacuousJump(jumpi: Statement)
+VacuousJump(j) :- JUMPI(j, _, c), VacuousCond(c).
+VacuousJump(j) :- JUMPI(j, _, c), ISZERO(_, z, c), VacuousCond(z).
+
+.decl RevertGuard(jumpi: Statement, block: Block)
+RevertGuard(j, b) :- ControlsWith(j, b, _), RevertCheck(j), !ConstDecided(j).
+
+.decl Precondition(func: Function, op: symbol, slot: symbol, cond: symbol)
+.output Precondition
+Precondition(f, o, sl, cat(w, e)) :-
+  AccessAt(f, o, c, s, b), SlotOf(s, c, sl), RevertGuard(j, b), !VacuousJump(j),
+  GuardHolds(j, b, e, h), GuardWord(h, w).
+
+.decl CondOf(stmt: Statement, expr: symbol)
+CondOf(s, cat(w, e)) :- AccessAt(_, _, _, s, b), RealGuard(j, b),
+                        GuardHolds(j, b, e, h), GuardWord(h, w).
+CondOf(s, cat(w, e)) :- AccessAt(_, _, _, s, b), RevertGuard(j, b), !VacuousJump(j),
+                        GuardHolds(j, b, e, h), GuardWord(h, w).
+
+.decl CondRank(stmt: Statement, expr: symbol, r: number)
+CondRank(s, e, r) :- CondOf(s, e), r = count : { CondOf(s, x), ord(x) < ord(e) }.
+
+.decl CondCount(stmt: Statement, n: number)
+CondCount(s, n) :- CondOf(s, _), n = count : { CondOf(s, x) }.
+
+.decl Fold(stmt: Statement, r: number, acc: symbol)
+Fold(s, 0, e) :- CondRank(s, e, 0).
+Fold(s, r + 1, cat(a, cat(" AND ", e))) :- Fold(s, r, a), CondRank(s, e, r + 1).
+
+.decl AllCond(stmt: Statement, expr: symbol)
+AllCond(s, a) :- Fold(s, r, a), CondCount(s, n), r = n - 1.
+
+.decl RWSetOne(func: Function, op: symbol, slot: symbol, cond: symbol)
+.output RWSetOne
+RWSetOne(f, o, sl, c)        :- AccessAt(f, o, cons, s, _), SlotOf(s, cons, sl), AllCond(s, c).
+RWSetOne(f, o, sl, "always") :- AccessAt(f, o, cons, s, _), SlotOf(s, cons, sl), !CondOf(s, _).
